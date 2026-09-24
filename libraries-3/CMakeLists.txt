@@ -37,5 +37,5 @@ configure_file(${SEL4_TUTORIALS_DIR}/tools/expect.py ${CMAKE_BINARY_DIR}/check @
 include(simulation)
 GenerateSimulateScript()
 
-target_sources(rootserver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tinyml/tinyml_runtime.c)
-target_include_directories(rootserver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tinyml)
+target_sources(libraries-3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tinyml/tinyml_runtime.c)
+target_include_directories(libraries-3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tinyml)
