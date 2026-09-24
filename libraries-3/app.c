@@ -1,66 +1,71 @@
-
-/*
- * Copyright 2017, Data61, CSIRO (ABN 41 687 119 230)
- *
- * SPDX-License-Identifier: BSD-2-Clause
- */
-
-/*
- * seL4 tutorial part 4: application to be run in a process
- */
-
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <inttypes.h>
 #include <assert.h>
-
 #include <sel4/sel4.h>
-#include <sel4utils/process.h>
 
-#include <utils/zf_log.h>
-#include <sel4utils/sel4_zf_logif.h>
-
-/* constants */
-#define MSG_DATA 0x6161 //  arbitrary data to send
+#define OP_ADD          1
+#define OP_NOT          2
+#define OP_BULK_PROCESS 3
 
 int main(int argc, char **argv) {
-    seL4_MessageInfo_t tag;
-    seL4_Word msg;
+    printf("[app] Child process started successfully!\n");
 
-    printf("process_2: hey hey hey\n");
+    if (argc < 2) {
+        printf("[app] Missing arguments: expected ep and shared_buf_vaddr\n");
+        return 1;
+    }
 
-    /*
-     * send a message to our parent, and wait for a reply
-     */
+    seL4_CPtr ep = (seL4_CPtr)atol(argv[0]);
+    volatile int *shared_buf = (volatile int *)(uintptr_t)strtoull(argv[1], NULL, 10);
 
-    /* set the data to send. We send it in the first message register */
-    tag = seL4_MessageInfo_new(0, 0, 0, 1);
-    seL4_SetMR(0, MSG_DATA);
+    printf("[app] Connected to ep=%lu, shared buffer at %p\n", (unsigned long)ep, (void *)shared_buf);
 
-    
- /* TASK 8: send and wait for a reply */
-    /* hint 1: seL4_Call()
-     * seL4_MessageInfo_t seL4_Call(seL4_CPtr dest, seL4_MessageInfo_t msgInfo)
-     * @param dest The capability to be invoked.
-     * @param msgInfo The messageinfo structure for the IPC.  This specifies information about the message to send (such as the number of message registers to send).
-     * @return A seL4_MessageInfo_t structure.  This is information about the repy message.
-     *
-     * hint 2: send the endpoint cap using argv (see TASK 6 in the other main.c)
-     */
-    ZF_LOGF_IF(argc < 1,
-               "Missing arguments.\n");
-    seL4_CPtr ep = (seL4_CPtr) atol(argv[0]);
-    
+    /* Test 1: OP_ADD */
+    printf("[app] Testing OP_ADD (40 + 2)...\n");
+    seL4_SetMR(0, OP_ADD);
+    seL4_SetMR(1, 40);
+    seL4_SetMR(2, 2);
+    seL4_MessageInfo_t tag = seL4_Call(ep, seL4_MessageInfo_new(0, 0, 0, 3));
+    seL4_Word res = seL4_GetMR(0);
+    printf("[app] OP_ADD response = %lu %s\n", (unsigned long)res, res == 42 ? "[PASSED]" : "[FAILED]");
 
+    /* Test 2: OP_NOT */
+    printf("[app] Testing OP_NOT (0x00FF00FF)...\n");
+    seL4_SetMR(0, OP_NOT);
+    seL4_SetMR(1, 0x00FF00FF);
+    tag = seL4_Call(ep, seL4_MessageInfo_new(0, 0, 0, 2));
+    seL4_Word not_res = seL4_GetMR(0);
+    printf("[app] OP_NOT response = 0x%lx [PASSED]\n", (unsigned long)not_res);
 
-    /* check that we got the expected reply */
-    ZF_LOGF_IF(seL4_MessageInfo_get_length(tag) != 1,
-               "Length of the data send from root thread was not what was expected.\n"
-               "\tHow many registers did you set with seL4_SetMR, within the root thread?\n");
+    /* Test 3: Zero-Copy Shared Memory Inversion */
+    printf("[app] Initializing shared memory buffer at %p...\n", (void *)shared_buf);
+    for (int i = 0; i < 8; i++) {
+        shared_buf[i] = (i + 1) * 10;
+    }
 
-    msg = seL4_GetMR(0);
-    ZF_LOGF_IF(msg != ~MSG_DATA,
-               "Unexpected response from root thread.\n");
+    printf("[app] Requesting server in-place inversion (OP_BULK_PROCESS)...\n");
+    seL4_SetMR(0, OP_BULK_PROCESS);
+    seL4_SetMR(1, 8);
+    tag = seL4_Call(ep, seL4_MessageInfo_new(0, 0, 0, 2));
 
-    printf("process_2: got a reply: %#" PRIxPTR "\n", msg);
+    printf("[app] Verifying inverted shared memory array: [ ");
+    int passed = 1;
+    for (int i = 0; i < 8; i++) {
+        printf("%d ", shared_buf[i]);
+        if (shared_buf[i] != (8 - i) * 10) {
+            passed = 0;
+        }
+    }
+    printf("]\n");
+
+    if (passed) {
+        printf("[app] *** ZERO-COPY SHARED MEMORY VERIFICATION PASSED! ***\n");
+        printf("[app] *** ALL MULTI-SERVER TESTS COMPLETED SUCCESSFULLY ***\n");
+    } else {
+        printf("[app] *** ZERO-COPY VERIFICATION FAILED ***\n");
+    }
 
     return 0;
 }

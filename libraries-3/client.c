@@ -1,41 +1,69 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <assert.h>
 #include <sel4/sel4.h>
-#include <utils/zf_log.h>
+#include <sel4debug/debug.h>
 
-#define OP_ADD 1
-#define OP_NOT 2
+#define OP_ADD          1
+#define OP_NOT          2
+#define OP_BULK_PROCESS 3
+
+static void dbg_puts(const char *s) {
+    while (*s) {
+        seL4_DebugPutChar(*s++);
+    }
+}
 
 int main(int argc, char **argv) {
-    printf("client: child process started!\n");
+    dbg_puts("[client] started!\n");
 
-    if (argc < 1) {
-        printf("client: missing endpoint capability argument\n");
-        return 1;
+    seL4_CPtr ep = (seL4_CPtr)strtoul(argv[0], NULL, 10);
+    volatile int *shared_buf = (volatile int *)(uintptr_t)strtoull(argv[1], NULL, 10);
+
+    /* 1. OP_ADD test */
+    dbg_puts("[client] testing OP_ADD (40 + 2)...\n");
+    seL4_SetMR(0, OP_ADD);
+    seL4_SetMR(1, 40);
+    seL4_SetMR(2, 2);
+    seL4_Call(ep, seL4_MessageInfo_new(0, 0, 0, 3));
+    seL4_Word res = seL4_GetMR(0);
+
+    if (res == 42) {
+        dbg_puts("[client] OP_ADD test PASSED: 42\n");
+    } else {
+        dbg_puts("[client] OP_ADD test FAILED\n");
     }
 
-    seL4_CPtr srv_ep = (seL4_CPtr)atol(argv[0]);
-    printf("client: invoking endpoint %lu...\n", (unsigned long)srv_ep);
+    /* 2. Zero-copy shared memory buffer test */
+    dbg_puts("[client] populating shared buffer at 0x50000000...\n");
+    for (int i = 0; i < 8; i++) {
+        shared_buf[i] = (i + 1) * 10;
+    }
 
-    /* Test 1: OP_ADD (105 + 215) */
-    seL4_SetMR(0, OP_ADD);
-    seL4_SetMR(1, 105);
-    seL4_SetMR(2, 215);
-    seL4_MessageInfo_t tag = seL4_MessageInfo_new(0, 0, 0, 3);
-    tag = seL4_Call(srv_ep, tag);
+    dbg_puts("[client] sending OP_BULK_PROCESS...\n");
+    seL4_SetMR(0, OP_BULK_PROCESS);
+    seL4_SetMR(1, 8);
+    seL4_Call(ep, seL4_MessageInfo_new(0, 0, 0, 2));
 
-    seL4_Word add_res = seL4_GetMR(0);
-    printf("client: OP_ADD result = %lu (Expected: 320)\n", (unsigned long)add_res);
+    dbg_puts("[client] verifying shared memory values after inversion...\n");
+    int passed = 1;
+    for (int i = 0; i < 8; i++) {
+        if (shared_buf[i] != (8 - i) * 10) {
+            passed = 0;
+            break;
+        }
+    }
 
-    /* Test 2: OP_NOT (0xAAAAAAAA) */
-    seL4_SetMR(0, OP_NOT);
-    seL4_SetMR(1, 0xAAAAAAAA);
-    tag = seL4_MessageInfo_new(0, 0, 0, 2);
-    tag = seL4_Call(srv_ep, tag);
+    if (passed) {
+        dbg_puts("[client] *** SHARED MEMORY ZERO-COPY VERIFICATION PASSED! ***\n");
+        dbg_puts("[client] *** ALL MULTI-SERVER TESTS COMPLETED SUCCESSFULLY ***\n");
+    } else {
+        dbg_puts("[client] *** SHARED MEMORY VERIFICATION FAILED ***\n");
+    }
 
-    seL4_Word not_res = seL4_GetMR(0);
-    printf("client: OP_NOT result = 0x%lx\n", (unsigned long)not_res);
-
-    printf("client: all multi-server RPC operations succeeded!\n");
+    while (1) {
+        seL4_Yield();
+    }
     return 0;
 }

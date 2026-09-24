@@ -1,31 +1,38 @@
+#
+# Copyright 2018, Data61, CSIRO (ABN 41 687 119 230)
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+
 include(${SEL4_TUTORIALS_DIR}/settings.cmake)
 sel4_tutorials_regenerate_tutorial(${CMAKE_CURRENT_SOURCE_DIR})
 
 cmake_minimum_required(VERSION 3.10)
+# declare the libraries-3 CMake project and the languages it is written in
 project(libraries-3 C ASM)
 
 sel4_tutorials_setup_roottask_tutorial_environment()
 
-# Target 1: Compute Server
-add_executable(compute_srv srv.c)
-target_link_libraries(compute_srv sel4runtime sel4 muslc utils
+add_executable(app app.c)
+target_link_libraries(app sel4runtime sel4 muslc utils sel4tutorials
                       sel4muslcsys sel4platsupport sel4utils sel4debug)
 
-# Target 2: Client
-add_executable(client client.c)
-target_link_libraries(client sel4runtime sel4 muslc utils
-                      sel4muslcsys sel4platsupport sel4utils sel4debug)
-
-# Bundle both processes into CPIO archive
 include(cpio)
-set(ARCHIVE_FILES "$<TARGET_FILE:compute_srv>;$<TARGET_FILE:client>")
-MakeCPIO(archive.o "${ARCHIVE_FILES}" DEPENDS compute_srv client)
+MakeCPIO(archive.o "$<TARGET_FILE:app>")
 
-# Root Task
 add_executable(libraries-3 archive.o main.c)
+
 target_link_libraries(libraries-3
-    sel4 muslc utils sel4tutorials sel4vka
+    sel4
+    muslc utils sel4tutorials
     sel4muslcsys sel4platsupport sel4utils sel4debug sel4allocman)
 
 include(rootserver)
 DeclareRootserver(libraries-3)
+set(FINISH_COMPLETION_TEXT "
+halting...")
+set(START_COMPLETION_TEXT "
+    Failed to reserve a chunk of memory.")
+configure_file(${SEL4_TUTORIALS_DIR}/tools/expect.py ${CMAKE_BINARY_DIR}/check @ONLY)
+include(simulation)
+GenerateSimulateScript()
