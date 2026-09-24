@@ -1,3 +1,4 @@
+#include "tinyml/tinyml_runtime.h"
 #include <autoconf.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -218,6 +219,15 @@ int main(void) {
                     } else {
                         memcpy((void *)audit_frame, rx_buffer, sizeof(sovereign_audit_frame_t));
                         evaluate_and_hash_frame(audit_frame);
+
+                    /* Isolated TinyML fixed-point inference pass */
+                    int32_t ml_cls = 0;
+                    uint32_t ml_conf = 0;
+                    tinyml_infer((const uint8_t *)audit_frame->nodes, &ml_cls, &ml_conf);
+                    if (ml_cls != 0) {
+                        /* Invariant flag: record anomaly signal */
+                        resp.flags |= 0x0002;
+                    }
 
                         resp.status_code = SOVR_STATUS_SUCCESS;
                         if (audit_frame->statutory_duty)           resp.flags |= SOVR_FLAG_STATUTORY_DUTY;
