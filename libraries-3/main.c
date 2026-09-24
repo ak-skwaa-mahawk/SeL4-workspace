@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 #include <assert.h>
 #include <sel4/sel4.h>
 #include <simple/simple.h>
@@ -18,12 +19,14 @@
 #include <utils/zf_log.h>
 #include <sel4platsupport/bootinfo.h>
 
-#define CLIENT_IMAGE_NAME "app"
-#define CLIENT_BADGE 0xC001
+#include "sovereign_contract.h"
 
-#define OP_ADD          1
-#define OP_NOT          2
-#define OP_BULK_PROCESS 3
+#define CLIENT_IMAGE_NAME "app"
+#define CLIENT_BADGE      0xC001
+
+#define OP_ADD            1
+#define OP_NOT            2
+#define OP_BULK_PROCESS   3
 
 #define ALLOCATOR_STATIC_POOL_SIZE (BIT(seL4_PageBits) * 10)
 static char allocator_mem_pool[ALLOCATOR_STATIC_POOL_SIZE];
@@ -114,6 +117,7 @@ int main(void) {
 
     printf("rootserver: client dispatched. Entering RPC server loop...\n");
 
+    volatile sovereign_audit_frame_t *audit_frame = (volatile sovereign_audit_frame_t *)SHARED_BUF_VADDR;
     volatile int *shared_buf = (volatile int *)SHARED_BUF_VADDR;
 
     /* Initial receive */
@@ -148,6 +152,44 @@ int main(void) {
             }
             seL4_SetMR(0, 0);
             reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
+        } else if (op == OP_SOVR_EVALUATE) {
+            printf("rootserver: [RPC] OP_SOVR_EVALUATE requested by badge 0x%lx\n", (unsigned long)sender_badge);
+
+            /* 1. Hardware capability verification */
+            int auth_ok = (sender_badge == ROLE_FIDUCIARY_PR);
+            int magic_ok = (audit_frame->magic == SOVR_MAGIC);
+
+            if (!magic_ok) {
+                printf("rootserver: [AUTH FAIL] Invalid magic 0x%08x\n", (unsigned int)audit_frame->magic);
+                seL4_SetMR(0, 0xFFFFFFFF);
+                reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
+            } else {
+                /* 2. Deterministic rules evaluation */
+                int has_orig_title = 0;
+                for (int i = 0; i < audit_frame->node_count && i < MAX_NODES; i++) {
+                    if (audit_frame->nodes[i].title_type == TITLE_ABORIGINAL_SOVEREIGN) {
+                        has_orig_title = 1;
+                        break;
+                    }
+                }
+                int has_judicial_orders = (audit_frame->dockets[0][0] != '\0');
+
+                if (auth_ok && has_orig_title && has_judicial_orders) {
+                    audit_frame->statutory_duty = 1; /* MANDATORY_ACCOUNTING_REQUIRED */
+                    audit_frame->corporate_defense_valid = 0;
+                    audit_frame->can_be_administered_away = 0;
+                    printf("rootserver: [EVAL PASSED] Claimant: %s -> MANDATORY_ACCOUNTING\n",
+                           (char *)audit_frame->claimant);
+                } else {
+                    audit_frame->statutory_duty = 0; /* DEFER_TO_ADMINISTRATIVE_PROXY */
+                    audit_frame->corporate_defense_valid = 1;
+                    audit_frame->can_be_administered_away = 1;
+                    printf("rootserver: [EVAL DEFERRED] Insufficient standing or dockets\n");
+                }
+
+                seL4_SetMR(0, 0); /* Success status */
+                reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
+            }
         } else {
             reply_tag = seL4_MessageInfo_new(0, 0, 0, 0);
         }
