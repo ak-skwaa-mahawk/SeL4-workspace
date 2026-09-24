@@ -10,7 +10,7 @@ echo "Target: $HARNESS"
 if command -v cbmc &> /dev/null; then
     echo "[*] CBMC detected. Executing formal bounded model checking (unwind 16)..."
     cbmc "$HARNESS" \
-        --unwind 16 \
+        --unwind 32 \
         --unwinding-assertions \
         --bounds-check \
         --pointer-check \
