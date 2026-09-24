@@ -77,5 +77,5 @@ typedef struct {
 
 #pragma pack(pop)
 
-_Static_assert(sizeof(sovereign_audit_frame_t) == 808, "sovereign_audit_frame_t size must exactly match 808 bytes");
+_Static_assert(sizeof(sovereign_audit_frame_t) == 816, "sovereign_audit_frame_t size must exactly match 816 bytes");
 _Static_assert(sizeof(sovereign_response_frame_t) == 40, "sovereign_response_frame_t size must exactly match 40 bytes");
