@@ -73,6 +73,8 @@ static void evaluate_and_hash_frame(volatile sovereign_audit_frame_t *audit_fram
     }
 }
 
+static uint64_t g_last_sequence_id = 0;
+
 int main(void) {
     int error;
     seL4_BootInfo *bootinfo = platsupport_get_bootinfo();
@@ -213,11 +215,18 @@ int main(void) {
                     if (incoming->magic != SOVR_MAGIC) {
                         printf("rootserver: [COM2 REJECT] Invalid magic 0x%08x\n", (unsigned int)incoming->magic);
                         resp.status_code = SOVR_STATUS_ERR_MAGIC;
+                    } else if (incoming->sequence_id <= g_last_sequence_id) {
+                        printf("rootserver: [COM2 REJECT] Replay or non-monotonic sequence: %lu <= %lu\n",
+                               (unsigned long)incoming->sequence_id, (unsigned long)g_last_sequence_id);
+                        resp.status_code = 0xe002;
+                        resp.flags = 0x0000;
+                        memset(resp.root_hash, 0, 32);
                     } else if (incoming->node_count > MAX_NODES) {
                         printf("rootserver: [COM2 REJECT] Node count out of bounds (%u > %u)\n", incoming->node_count, MAX_NODES);
                         resp.status_code = SOVR_STATUS_ERR_BOUNDS;
                     } else {
                         memcpy((void *)audit_frame, rx_buffer, sizeof(sovereign_audit_frame_t));
+                        g_last_sequence_id = incoming->sequence_id;
                         evaluate_and_hash_frame(audit_frame);
 
                     /* Bounded multi-node TinyML fixed-point inference sweep */
