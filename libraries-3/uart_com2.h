@@ -7,6 +7,7 @@
 
 #define COM2_PORT_BASE 0x2f8
 #define COM2_PORT_TOP  0x2ff
+#define COM2_IRQ       3
 
 /* 16550A Register Offsets */
 #define UART_DATA      0  /* Data R/W (DLAB=0) */
@@ -17,6 +18,14 @@
 #define UART_LCR       3  /* Line Control Register */
 #define UART_MCR       4  /* Modem Control Register */
 #define UART_LSR       5  /* Line Status Register */
+
+/* Interrupt Enable Register bits */
+#define IER_RDA        0x01  /* Enable Received Data Available Interrupt */
+
+/* Modem Control Register bits */
+#define MCR_DTR        0x01
+#define MCR_RTS        0x02
+#define MCR_OUT2       0x08  /* Required on PC architecture to gate IRQ assertion */
 
 /* Line Status Register bits */
 #define LSR_DR         0x01  /* Data Ready */
@@ -32,24 +41,27 @@ static inline void uart_outb(seL4_CPtr ioport_cap, uint16_t port, uint8_t val) {
 }
 
 static inline void uart_com2_init(seL4_CPtr ioport_cap) {
-    /* Disable interrupts */
+    /* 1. Disable interrupts during setup */
     uart_outb(ioport_cap, COM2_PORT_BASE + UART_IER, 0x00);
 
-    /* Enable DLAB (set baud rate divisor) */
+    /* 2. Enable DLAB (set baud rate divisor) */
     uart_outb(ioport_cap, COM2_PORT_BASE + UART_LCR, 0x80);
 
     /* Set divisor to 1 (115200 baud): DLL = 1, DLH = 0 */
     uart_outb(ioport_cap, COM2_PORT_BASE + UART_DLL, 0x01);
     uart_outb(ioport_cap, COM2_PORT_BASE + UART_DLH, 0x00);
 
-    /* 8 bits, no parity, one stop bit (8N1), clear DLAB */
+    /* 3. 8 bits, no parity, one stop bit (8N1), clear DLAB */
     uart_outb(ioport_cap, COM2_PORT_BASE + UART_LCR, 0x03);
 
-    /* Enable FIFO, clear TX/RX FIFOs, 14-byte threshold */
-    uart_outb(ioport_cap, COM2_PORT_BASE + UART_FCR, 0xC7);
+    /* 4. Enable FIFO, clear TX/RX FIFOs, 1-byte trigger to ensure low latency */
+    uart_outb(ioport_cap, COM2_PORT_BASE + UART_FCR, 0x07);
 
-    /* Turn on RTS and DTR */
-    uart_outb(ioport_cap, COM2_PORT_BASE + UART_MCR, 0x03);
+    /* 5. Turn on RTS, DTR, and OUT2 (OUT2 gates interrupt line to PIC/APIC) */
+    uart_outb(ioport_cap, COM2_PORT_BASE + UART_MCR, MCR_DTR | MCR_RTS | MCR_OUT2);
+
+    /* 6. Enable Received Data Available Interrupt */
+    uart_outb(ioport_cap, COM2_PORT_BASE + UART_IER, IER_RDA);
 }
 
 static inline bool uart_com2_has_data(seL4_CPtr ioport_cap) {

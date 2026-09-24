@@ -95,7 +95,7 @@ int main(void) {
     assert(virtual_reservation.res);
     bootstrap_configure_virtual_pool(allocman, vaddr, ALLOCATOR_VIRTUAL_POOL_SIZE, seL4_CapInitThreadVSpace);
 
-    /* 1. Endpoint allocation */
+    /* 1. IPC Endpoint allocation */
     vka_object_t ep_object = {0};
     error = vka_alloc_endpoint(&vka, &ep_object);
     ZF_LOGF_IFERR(error, "Failed to allocate endpoint");
@@ -103,7 +103,26 @@ int main(void) {
     cspacepath_t ep_path;
     vka_cspace_make_path(&vka, ep_object.cptr, &ep_path);
 
-    /* 2. Shared physical page allocation */
+    /* 2. Notification object for IRQ 3 */
+    vka_object_t irq_ntfn = {0};
+    error = vka_alloc_notification(&vka, &irq_ntfn);
+    ZF_LOGF_IFERR(error, "Failed to allocate notification object");
+
+    /* 3. COM2 IRQ Handler Capability (IRQ 3) */
+    cspacepath_t com2_irq_path;
+    error = vka_cspace_alloc_path(&vka, &com2_irq_path);
+    ZF_LOGF_IFERR(error, "Failed to allocate cspace slot for COM2 IRQ");
+
+    error = simple_get_IRQ_handler(&simple, COM2_IRQ, com2_irq_path);
+    ZF_LOGF_IFERR(error, "Failed to obtain COM2 IRQ handler");
+
+    error = seL4_IRQHandler_SetNotification(com2_irq_path.capPtr, irq_ntfn.cptr);
+    ZF_LOGF_IFERR(error, "Failed to bind notification to COM2 IRQ");
+
+    error = seL4_IRQHandler_Ack(com2_irq_path.capPtr);
+    ZF_LOGF_IFERR(error, "Failed to initial-ack COM2 IRQ");
+
+    /* 4. Shared physical page allocation */
     vka_object_t shared_frame_obj = {0};
     error = vka_alloc_frame(&vka, seL4_PageBits, &shared_frame_obj);
     ZF_LOGF_IFERR(error, "Failed to allocate shared frame object");
@@ -126,7 +145,7 @@ int main(void) {
                                seL4_AllRights, 1, root_pt_objects, &root_num_pt_objects);
     ZF_LOGF_IFERR(error, "Failed to map shared page into root task");
 
-    /* 3. COM2 Port I/O Capability */
+    /* 5. COM2 Port I/O Capability */
     cspacepath_t com2_ioport_path;
     error = vka_cspace_alloc_path(&vka, &com2_ioport_path);
     ZF_LOGF_IFERR(error, "Failed to allocate cspace slot for COM2 IOPort");
@@ -136,10 +155,10 @@ int main(void) {
     ZF_LOGF_IFERR(error, "Failed to obtain COM2 IOPort capability");
 
     uart_com2_init(com2_ioport_path.capPtr);
-    printf("rootserver: [COM2] Continuous Structured UART listener active at 0x%x-0x%x\n",
-           COM2_PORT_BASE, COM2_PORT_TOP);
+    printf("rootserver: [COM2] Interrupt-driven (IRQ %d) UART active at 0x%x-0x%x\n",
+           COM2_IRQ, COM2_PORT_BASE, COM2_PORT_TOP);
 
-    /* 4. Client Process Configuration */
+    /* 6. Client Process Configuration */
     sel4utils_process_t client_proc;
     sel4utils_process_config_t client_conf = process_config_default_simple(&simple, CLIENT_IMAGE_NAME, 200);
     error = sel4utils_configure_process_custom(&client_proc, &vka, &vspace, client_conf);
@@ -163,7 +182,7 @@ int main(void) {
     error = sel4utils_spawn_process_v(&client_proc, &vka, &vspace, 3, client_argv, 1);
     ZF_LOGF_IFERR(error, "Failed to spawn client");
 
-    printf("rootserver: client dispatched. Entering unified non-blocking event loop...\n");
+    printf("rootserver: client dispatched. Entering interrupt-driven event loop...\n");
 
     volatile sovereign_audit_frame_t *audit_frame = (volatile sovereign_audit_frame_t *)SHARED_BUF_VADDR;
     volatile int *shared_buf = (volatile int *)SHARED_BUF_VADDR;
@@ -174,42 +193,48 @@ int main(void) {
     while (1) {
         bool had_work = false;
 
-        /* --- 1. COM2 Serial Ingestion --- */
-        while (uart_com2_has_data(com2_ioport_path.capPtr)) {
+        /* --- 1. COM2 IRQ Handling & Serial Ingestion --- */
+        seL4_Word badge = 0;
+        seL4_Poll(irq_ntfn.cptr, &badge);
+
+        if (uart_com2_has_data(com2_ioport_path.capPtr)) {
             had_work = true;
-            uint8_t byte = uart_com2_read_byte(com2_ioport_path.capPtr);
-            rx_buffer[rx_index++] = byte;
+            while (uart_com2_has_data(com2_ioport_path.capPtr)) {
+                uint8_t byte = uart_inb(com2_ioport_path.capPtr, COM2_PORT_BASE + UART_DATA);
+                rx_buffer[rx_index++] = byte;
 
-            if (rx_index == sizeof(sovereign_audit_frame_t)) {
-                rx_index = 0;
-                sovereign_audit_frame_t *incoming = (sovereign_audit_frame_t *)rx_buffer;
-                sovereign_response_frame_t resp = {0};
-                resp.magic = SOVA_MAGIC;
+                if (rx_index == sizeof(sovereign_audit_frame_t)) {
+                    rx_index = 0;
+                    sovereign_audit_frame_t *incoming = (sovereign_audit_frame_t *)rx_buffer;
+                    sovereign_response_frame_t resp = {0};
+                    resp.magic = SOVA_MAGIC;
 
-                if (incoming->magic != SOVR_MAGIC) {
-                    printf("rootserver: [COM2 REJECT] Invalid magic 0x%08x\n", (unsigned int)incoming->magic);
-                    resp.status_code = SOVR_STATUS_ERR_MAGIC;
-                } else if (incoming->node_count > MAX_NODES) {
-                    printf("rootserver: [COM2 REJECT] Node count out of bounds (%u > %u)\n", incoming->node_count, MAX_NODES);
-                    resp.status_code = SOVR_STATUS_ERR_BOUNDS;
-                } else {
-                    memcpy((void *)audit_frame, rx_buffer, sizeof(sovereign_audit_frame_t));
-                    evaluate_and_hash_frame(audit_frame);
+                    if (incoming->magic != SOVR_MAGIC) {
+                        printf("rootserver: [COM2 REJECT] Invalid magic 0x%08x\n", (unsigned int)incoming->magic);
+                        resp.status_code = SOVR_STATUS_ERR_MAGIC;
+                    } else if (incoming->node_count > MAX_NODES) {
+                        printf("rootserver: [COM2 REJECT] Node count out of bounds (%u > %u)\n", incoming->node_count, MAX_NODES);
+                        resp.status_code = SOVR_STATUS_ERR_BOUNDS;
+                    } else {
+                        memcpy((void *)audit_frame, rx_buffer, sizeof(sovereign_audit_frame_t));
+                        evaluate_and_hash_frame(audit_frame);
 
-                    resp.status_code = SOVR_STATUS_SUCCESS;
-                    if (audit_frame->statutory_duty)           resp.flags |= SOVR_FLAG_STATUTORY_DUTY;
-                    if (audit_frame->corporate_defense_valid)  resp.flags |= SOVR_FLAG_CORP_DEFENSE_VALID;
-                    if (audit_frame->can_be_administered_away) resp.flags |= SOVR_FLAG_CAN_BE_ADMINISTERED;
-                    memcpy(resp.root_hash, (const void *)audit_frame->computed_root_hash, 32);
+                        resp.status_code = SOVR_STATUS_SUCCESS;
+                        if (audit_frame->statutory_duty)           resp.flags |= SOVR_FLAG_STATUTORY_DUTY;
+                        if (audit_frame->corporate_defense_valid)  resp.flags |= SOVR_FLAG_CORP_DEFENSE_VALID;
+                        if (audit_frame->can_be_administered_away) resp.flags |= SOVR_FLAG_CAN_BE_ADMINISTERED;
+                        memcpy(resp.root_hash, (const void *)audit_frame->computed_root_hash, 32);
 
-                    printf("rootserver: [COM2 ACK] Certified frame. Status: 0x%04x, Flags: 0x%04x\n", resp.status_code, resp.flags);
+                        printf("rootserver: [COM2 ACK] Certified frame. Status: 0x%04x, Flags: 0x%04x\n", resp.status_code, resp.flags);
+                    }
+
+                    uart_com2_write_exact(com2_ioport_path.capPtr, (const uint8_t *)&resp, sizeof(resp));
                 }
-
-                uart_com2_write_exact(com2_ioport_path.capPtr, (const uint8_t *)&resp, sizeof(resp));
             }
+            seL4_IRQHandler_Ack(com2_irq_path.capPtr);
         }
 
-        /* --- 2. Non-Blocking IPC Servicing --- */
+        /* --- 2. Non-Blocking Client IPC Servicing --- */
         seL4_Word sender_badge = 0;
         seL4_MessageInfo_t msg_info = seL4_NBRecv(ep_object.cptr, &sender_badge);
 
