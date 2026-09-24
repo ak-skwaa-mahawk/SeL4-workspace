@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include <sel4/sel4.h>
 
 #define COM2_PORT_BASE 0x2f8
@@ -51,8 +52,12 @@ static inline void uart_com2_init(seL4_CPtr ioport_cap) {
     uart_outb(ioport_cap, COM2_PORT_BASE + UART_MCR, 0x03);
 }
 
+static inline bool uart_com2_has_data(seL4_CPtr ioport_cap) {
+    return (uart_inb(ioport_cap, COM2_PORT_BASE + UART_LSR) & LSR_DR) != 0;
+}
+
 static inline uint8_t uart_com2_read_byte(seL4_CPtr ioport_cap) {
-    while ((uart_inb(ioport_cap, COM2_PORT_BASE + UART_LSR) & LSR_DR) == 0) {
+    while (!uart_com2_has_data(ioport_cap)) {
         /* Busy-wait / poll */
     }
     return uart_inb(ioport_cap, COM2_PORT_BASE + UART_DATA);
@@ -63,12 +68,6 @@ static inline void uart_com2_write_byte(seL4_CPtr ioport_cap, uint8_t b) {
         /* Busy-wait / poll */
     }
     uart_outb(ioport_cap, COM2_PORT_BASE + UART_DATA, b);
-}
-
-static inline void uart_com2_read_exact(seL4_CPtr ioport_cap, uint8_t *dest, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        dest[i] = uart_com2_read_byte(ioport_cap);
-    }
 }
 
 static inline void uart_com2_write_exact(seL4_CPtr ioport_cap, const uint8_t *src, size_t len) {

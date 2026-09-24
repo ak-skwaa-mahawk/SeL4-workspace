@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 #include <assert.h>
 #include <sel4/sel4.h>
@@ -136,28 +137,10 @@ int main(void) {
     ZF_LOGF_IFERR(error, "Failed to obtain COM2 IOPort capability");
 
     uart_com2_init(com2_ioport_path.capPtr);
-    printf("rootserver: [COM2] Hardware UART initialized at 0x%x-0x%x (115200 8N1)\n",
+    printf("rootserver: [COM2] Continuous Hardware UART listener active at 0x%x-0x%x (115200 8N1)\n",
            COM2_PORT_BASE, COM2_PORT_TOP);
 
-    /* 4. Serial Ingestion: Poll for 808-byte SovereignAuditFrame */
-    volatile sovereign_audit_frame_t *audit_frame = (volatile sovereign_audit_frame_t *)SHARED_BUF_VADDR;
-    printf("rootserver: [COM2] Awaiting 808-byte binary frame ingestion...\n");
-
-    uart_com2_read_exact(com2_ioport_path.capPtr, (uint8_t *)audit_frame, sizeof(sovereign_audit_frame_t));
-    printf("rootserver: [COM2] Successfully received 808 bytes! Magic: 0x%08x\n", (unsigned int)audit_frame->magic);
-
-    if (audit_frame->magic == SOVR_MAGIC) {
-        evaluate_and_hash_frame(audit_frame);
-        printf("rootserver: [COM2 EVAL] Standing verified. SHA-256 root generated.\n");
-        uart_com2_write_exact(com2_ioport_path.capPtr, (const uint8_t *)audit_frame->computed_root_hash, 32);
-        printf("rootserver: [COM2 ACK] Sent 32-byte SHA-256 digest back over serial.\n");
-    } else {
-        printf("rootserver: [COM2 ERROR] Corrupt magic 0x%08x received!\n", (unsigned int)audit_frame->magic);
-        uint8_t err_resp[32] = {0};
-        uart_com2_write_exact(com2_ioport_path.capPtr, err_resp, 32);
-    }
-
-    /* 5. Configure Client Process ("app") */
+    /* 4. Configure and Spawn Client Process ("app") */
     sel4utils_process_t client_proc;
     sel4utils_process_config_t client_conf = process_config_default_simple(&simple, CLIENT_IMAGE_NAME, 200);
     error = sel4utils_configure_process_custom(&client_proc, &vka, &vspace, client_conf);
@@ -181,51 +164,94 @@ int main(void) {
     error = sel4utils_spawn_process_v(&client_proc, &vka, &vspace, 3, client_argv, 1);
     ZF_LOGF_IFERR(error, "Failed to spawn client");
 
-    printf("rootserver: client dispatched. Entering server IPC loop...\n");
+    printf("rootserver: client dispatched. Entering unified non-blocking event loop...\n");
 
+    volatile sovereign_audit_frame_t *audit_frame = (volatile sovereign_audit_frame_t *)SHARED_BUF_VADDR;
     volatile int *shared_buf = (volatile int *)SHARED_BUF_VADDR;
-    seL4_Word sender_badge = 0;
-    seL4_MessageInfo_t msg_info = seL4_Recv(ep_object.cptr, &sender_badge);
+
+    /* Continuous COM2 Stream Accumulator */
+    uint8_t rx_buffer[sizeof(sovereign_audit_frame_t)];
+    size_t rx_index = 0;
 
     while (1) {
-        seL4_Word op = seL4_GetMR(0);
-        seL4_MessageInfo_t reply_tag;
+        bool had_work = false;
 
-        if (op == OP_ADD) {
-            seL4_Word a = seL4_GetMR(1);
-            seL4_Word b = seL4_GetMR(2);
-            seL4_SetMR(0, a + b);
-            reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
-        } else if (op == OP_NOT) {
-            seL4_Word val = seL4_GetMR(1);
-            seL4_SetMR(0, ~val);
-            reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
-        } else if (op == OP_BULK_PROCESS) {
-            seL4_Word len = seL4_GetMR(1);
-            for (seL4_Word i = 0; i < len / 2; i++) {
-                int tmp = shared_buf[i];
-                shared_buf[i] = shared_buf[len - 1 - i];
-                shared_buf[len - 1 - i] = tmp;
+        /* --- 1. Service COM2 Ingestion --- */
+        while (uart_com2_has_data(com2_ioport_path.capPtr)) {
+            had_work = true;
+            uint8_t byte = uart_com2_read_byte(com2_ioport_path.capPtr);
+            rx_buffer[rx_index++] = byte;
+
+            if (rx_index == sizeof(sovereign_audit_frame_t)) {
+                rx_index = 0;
+                sovereign_audit_frame_t *incoming = (sovereign_audit_frame_t *)rx_buffer;
+                printf("rootserver: [COM2] Frame received (808 bytes). Magic: 0x%08x\n", (unsigned int)incoming->magic);
+
+                if (incoming->magic == SOVR_MAGIC) {
+                    memcpy((void *)audit_frame, rx_buffer, sizeof(sovereign_audit_frame_t));
+                    evaluate_and_hash_frame(audit_frame);
+                    printf("rootserver: [COM2 EVAL] Standing verified. SHA-256 generated.\n");
+                    uart_com2_write_exact(com2_ioport_path.capPtr, (const uint8_t *)audit_frame->computed_root_hash, 32);
+                    printf("rootserver: [COM2 ACK] Sent 32-byte digest acknowledgment.\n");
+                } else {
+                    printf("rootserver: [COM2 ERROR] Invalid magic 0x%08x rejected!\n", (unsigned int)incoming->magic);
+                    uint8_t err_resp[32] = {0};
+                    uart_com2_write_exact(com2_ioport_path.capPtr, err_resp, 32);
+                }
             }
-            seL4_SetMR(0, 0);
-            reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
-        } else if (op == OP_SOVR_EVALUATE) {
-            if (sender_badge != ROLE_FIDUCIARY_PR) {
-                seL4_SetMR(0, 0xE001);
-                reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
-            } else if (audit_frame->magic != SOVR_MAGIC) {
-                seL4_SetMR(0, 0xE002);
-                reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
-            } else {
-                evaluate_and_hash_frame(audit_frame);
-                seL4_SetMR(0, 0);
-                reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
-            }
-        } else {
-            reply_tag = seL4_MessageInfo_new(0, 0, 0, 0);
         }
 
-        msg_info = seL4_ReplyRecv(ep_object.cptr, reply_tag, &sender_badge);
+        /* --- 2. Service Non-Blocking IPC --- */
+        seL4_Word sender_badge = 0;
+        seL4_MessageInfo_t msg_info = seL4_NBRecv(ep_object.cptr, &sender_badge);
+
+        if (seL4_MessageInfo_get_length(msg_info) > 0 || sender_badge != 0) {
+            had_work = true;
+            seL4_Word op = seL4_GetMR(0);
+            seL4_MessageInfo_t reply_tag;
+
+            if (op == OP_ADD) {
+                seL4_Word a = seL4_GetMR(1);
+                seL4_Word b = seL4_GetMR(2);
+                seL4_SetMR(0, a + b);
+                reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
+            } else if (op == OP_NOT) {
+                seL4_Word val = seL4_GetMR(1);
+                seL4_SetMR(0, ~val);
+                reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
+            } else if (op == OP_BULK_PROCESS) {
+                seL4_Word len = seL4_GetMR(1);
+                for (seL4_Word i = 0; i < len / 2; i++) {
+                    int tmp = shared_buf[i];
+                    shared_buf[i] = shared_buf[len - 1 - i];
+                    shared_buf[len - 1 - i] = tmp;
+                }
+                seL4_SetMR(0, 0);
+                reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
+            } else if (op == OP_SOVR_EVALUATE) {
+                if (sender_badge != ROLE_FIDUCIARY_PR) {
+                    seL4_SetMR(0, 0xE001);
+                    reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
+                } else if (audit_frame->magic != SOVR_MAGIC) {
+                    seL4_SetMR(0, 0xE002);
+                    reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
+                } else {
+                    evaluate_and_hash_frame(audit_frame);
+                    seL4_SetMR(0, 0);
+                    reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
+                }
+            } else {
+                reply_tag = seL4_MessageInfo_new(0, 0, 0, 0);
+            }
+
+            /* Reply directly to the unblocked caller */
+            seL4_Reply(reply_tag);
+        }
+
+        /* --- 3. Yield CPU if Idle --- */
+        if (!had_work) {
+            seL4_Yield();
+        }
     }
 
     return 0;
