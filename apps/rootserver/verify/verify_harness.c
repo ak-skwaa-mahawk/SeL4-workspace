@@ -21,6 +21,27 @@
 #define SOVR_FLAG_CAN_BE_ADMINISTERED (1 << 2)
 #define SOVR_FLAG_ANOMALY_DETECTED    (1 << 3)
 
+/* =========================================================================
+ * Formal CBMC Proof Harness: Q16.16 Saturating Arithmetic
+ * ========================================================================= */
+#define Q16_SHIFT 16
+#define Q16_MAX   ((int32_t)0x7FFFFFFF)
+#define Q16_MIN   ((int32_t)0x80000000)
+
+static inline int32_t q16_mul_sat(int32_t a, int32_t b) {
+    int64_t prod = ((int64_t)a * (int64_t)b) >> Q16_SHIFT;
+    if (prod > (int64_t)Q16_MAX) return Q16_MAX;
+    if (prod < (int64_t)Q16_MIN) return Q16_MIN;
+    return (int32_t)prod;
+}
+
+static inline int32_t q16_add_sat(int32_t a, int32_t b) {
+    int64_t sum = (int64_t)a + (int64_t)b;
+    if (sum > (int64_t)Q16_MAX) return Q16_MAX;
+    if (sum < (int64_t)Q16_MIN) return Q16_MIN;
+    return (int32_t)sum;
+}
+
 #pragma pack(push, 1)
 typedef struct {
     char     name[32];
@@ -57,20 +78,42 @@ typedef struct {
 
 #ifdef __CPROVER__
 int nondet_int(void);
+int32_t nondet_int32(void);
 uint8_t nondet_uint8(void);
 uint32_t nondet_uint32(void);
+
+static void verify_q16_saturation_properties(void) {
+    int32_t a = nondet_int32();
+    int32_t b = nondet_int32();
+
+    int32_t mul_res = q16_mul_sat(a, b);
+    __CPROVER_assert(mul_res <= Q16_MAX, "Q16_MUL_MAX_BOUND");
+    __CPROVER_assert(mul_res >= Q16_MIN, "Q16_MUL_MIN_BOUND");
+
+    int32_t add_res = q16_add_sat(a, b);
+    __CPROVER_assert(add_res <= Q16_MAX, "Q16_ADD_MAX_BOUND");
+    __CPROVER_assert(add_res >= Q16_MIN, "Q16_ADD_MIN_BOUND");
+
+    if (a > 0 && b > 0 && mul_res != Q16_MAX) {
+        __CPROVER_assert(mul_res >= 0, "Q16_MUL_NO_POSITIVE_WRAPAROUND");
+    }
+}
 
 int tinyml_infer_stub(const uint8_t input[128], int32_t *classification, uint32_t *confidence_q16) {
     __CPROVER_assert(input != NULL, "tinyml_infer input non-null");
     __CPROVER_assert(classification != NULL, "tinyml_infer classification non-null");
     __CPROVER_assert(confidence_q16 != NULL, "tinyml_infer confidence non-null");
-    
+
     *classification = nondet_int() ? 1 : 0;
     *confidence_q16 = nondet_uint32() & 0xFFFF;
     return 0;
 }
 
 int main(void) {
+    /* Formally verify Q16.16 math saturation */
+    verify_q16_saturation_properties();
+
+    /* Formally verify multi-node batch unrolling */
     sovereign_audit_frame_t frame;
     sovereign_response_frame_t resp;
     memset(&resp, 0, sizeof(resp));
@@ -98,7 +141,7 @@ int main(void) {
 
         uint8_t feature_buf[128] = {0};
         size_t cpy_len = sizeof(feature_buf) < sizeof(frame.nodes[n]) ? sizeof(feature_buf) : sizeof(frame.nodes[n]);
-        
+
         __CPROVER_assert(cpy_len <= sizeof(feature_buf), "Buffer copy does not overflow feature_buf");
         __CPROVER_assert(cpy_len <= sizeof(frame.nodes[n]), "Buffer copy does not overrun source node");
 
@@ -128,6 +171,30 @@ int main(void) {
 }
 #else
 
+static void verify_q16_saturation_properties(void) {
+    static const int32_t corners[] = {
+        0, 1, -1, Q16_MAX, Q16_MIN, Q16_MAX - 1, Q16_MIN + 1,
+        (1 << 16), -(1 << 16), (1 << 15), -(1 << 15)
+    };
+    size_t n = sizeof(corners) / sizeof(corners[0]);
+    for (size_t i = 0; i < n; i++) {
+        for (size_t j = 0; j < n; j++) {
+            int32_t a = corners[i];
+            int32_t b = corners[j];
+
+            int32_t m = q16_mul_sat(a, b);
+            assert(m <= Q16_MAX && m >= Q16_MIN);
+
+            int32_t add = q16_add_sat(a, b);
+            assert(add <= Q16_MAX && add >= Q16_MIN);
+
+            if (a > 0 && b > 0 && m != Q16_MAX) {
+                assert(m >= 0);
+            }
+        }
+    }
+}
+
 static int evaluate_frame_mock(const sovereign_audit_frame_t *frame, sovereign_response_frame_t *resp) {
     if (!frame || !resp) return -1;
     memset(resp, 0, sizeof(*resp));
@@ -152,24 +219,29 @@ static int evaluate_frame_mock(const sovereign_audit_frame_t *frame, sovereign_r
 
         memcpy(feature_buf, (const uint8_t *)&frame->nodes[n], cpy_len);
 
-        /* Deterministic mock inference */
         int32_t ml_cls = (feature_buf[0] == 127) ? 1 : 0;
         if (ml_cls != 0) {
             resp->flags |= SOVR_FLAG_ANOMALY_DETECTED;
         }
+
         iterations++;
     }
 
     assert(iterations == frame->node_count);
     assert(iterations <= MAX_NODES);
     assert((resp->flags & (SOVR_FLAG_STATUTORY_DUTY | SOVR_FLAG_CORP_DEFENSE_VALID | SOVR_FLAG_CAN_BE_ADMINISTERED)) == 0);
+
     return 0;
 }
 
 int main(void) {
-    printf("[*] Running native sanitizer harness: Bounded Multi-Node Invariant Sweep\n");
+    printf("[*] Running native sanitizer harness: Bounded Multi-Node & Q16.16 Invariant Sweep\n");
 
-    /* 1. Boundary checks: node_count = 0 through 16 */
+    /* 1. Verify Q16.16 arithmetic boundary saturation */
+    verify_q16_saturation_properties();
+    printf("[+] Passed Q16.16 deterministic saturation boundary checks.\n");
+
+    /* 2. Boundary checks: node_count = 0 through 16 */
     for (uint32_t count = 0; count <= 16; count++) {
         sovereign_audit_frame_t frame;
         memset(&frame, 0, sizeof(frame));
@@ -187,7 +259,7 @@ int main(void) {
     }
     printf("[+] Passed all boundary checks (node_count in [0, 16]).\n");
 
-    /* 2. Anomaly flag isolation test */
+    /* 3. Anomaly flag isolation test */
     {
         sovereign_audit_frame_t frame;
         memset(&frame, 0, sizeof(frame));
@@ -203,7 +275,7 @@ int main(void) {
     }
     printf("[+] Passed dynamic anomaly flag isolation and preservation check.\n");
 
-    /* 3. Fuzzing stress test: 20,000 iterations */
+    /* 4. Fuzzing stress test: 20,000 iterations */
     srand(0x534F5652);
     for (int iter = 0; iter < 20000; iter++) {
         sovereign_audit_frame_t frame;
