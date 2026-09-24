@@ -44,3 +44,6 @@ timer client wakes up:
 configure_file(${SEL4_TUTORIALS_DIR}/tools/expect.py ${CMAKE_BINARY_DIR}/check @ONLY)
 include(simulation)
 GenerateSimulateScript()
+
+target_sources(rootserver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../apps/rootserver/src/tinyml/tinyml_runtime.c)
+target_include_directories(rootserver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../apps/rootserver/src/tinyml)
