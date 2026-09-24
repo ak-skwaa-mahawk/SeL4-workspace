@@ -39,6 +39,38 @@ static sel4utils_alloc_data_t data;
 #define SHARED_BUF_VADDR ((void *)0x50000000ULL)
 #define NUM_PAGE_LEVELS 4
 
+static void evaluate_and_hash_frame(volatile sovereign_audit_frame_t *audit_frame) {
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx, (const void *)audit_frame->claimant, sizeof(audit_frame->claimant));
+    sha256_update(&ctx, (const void *)audit_frame->dockets, sizeof(audit_frame->dockets));
+    size_t nodes_size = sizeof(c_lineage_node_t) * audit_frame->node_count;
+    sha256_update(&ctx, (const void *)audit_frame->nodes, nodes_size);
+
+    uint8_t digest[32];
+    sha256_final(&ctx, digest);
+    memcpy((void *)audit_frame->computed_root_hash, digest, 32);
+
+    int has_orig_title = 0;
+    for (int i = 0; i < audit_frame->node_count && i < MAX_NODES; i++) {
+        if (audit_frame->nodes[i].title_type == TITLE_ABORIGINAL_SOVEREIGN) {
+            has_orig_title = 1;
+            break;
+        }
+    }
+    int has_judicial_orders = (audit_frame->dockets[0][0] != '\0');
+
+    if (has_orig_title && has_judicial_orders) {
+        audit_frame->statutory_duty = 1;
+        audit_frame->corporate_defense_valid = 0;
+        audit_frame->can_be_administered_away = 0;
+    } else {
+        audit_frame->statutory_duty = 0;
+        audit_frame->corporate_defense_valid = 1;
+        audit_frame->can_be_administered_away = 1;
+    }
+}
+
 int main(void) {
     int error;
     seL4_BootInfo *bootinfo = platsupport_get_bootinfo();
@@ -115,41 +147,9 @@ int main(void) {
     printf("rootserver: [COM2] Successfully received 808 bytes! Magic: 0x%08x\n", (unsigned int)audit_frame->magic);
 
     if (audit_frame->magic == SOVR_MAGIC) {
-        /* Compute SHA-256 in-place */
-        sha256_ctx_t ctx;
-        sha256_init(&ctx);
-        sha256_update(&ctx, (const void *)audit_frame->claimant, sizeof(audit_frame->claimant));
-        sha256_update(&ctx, (const void *)audit_frame->dockets, sizeof(audit_frame->dockets));
-        size_t nodes_size = sizeof(c_lineage_node_t) * audit_frame->node_count;
-        sha256_update(&ctx, (const void *)audit_frame->nodes, nodes_size);
-
-        uint8_t digest[32];
-        sha256_final(&ctx, digest);
-        memcpy((void *)audit_frame->computed_root_hash, digest, 32);
-
-        /* Evaluate statutory duty */
-        int has_orig_title = 0;
-        for (int i = 0; i < audit_frame->node_count && i < MAX_NODES; i++) {
-            if (audit_frame->nodes[i].title_type == TITLE_ABORIGINAL_SOVEREIGN) {
-                has_orig_title = 1;
-                break;
-            }
-        }
-        int has_judicial_orders = (audit_frame->dockets[0][0] != '\0');
-
-        if (has_orig_title && has_judicial_orders) {
-            audit_frame->statutory_duty = 1;
-            audit_frame->corporate_defense_valid = 0;
-            audit_frame->can_be_administered_away = 0;
-            printf("rootserver: [COM2 EVAL] Standing verified. SHA-256 root generated.\n");
-        } else {
-            audit_frame->statutory_duty = 0;
-            audit_frame->corporate_defense_valid = 1;
-            audit_frame->can_be_administered_away = 1;
-        }
-
-        /* Send 32-byte digest back via COM2 as acknowledgment */
-        uart_com2_write_exact(com2_ioport_path.capPtr, digest, 32);
+        evaluate_and_hash_frame(audit_frame);
+        printf("rootserver: [COM2 EVAL] Standing verified. SHA-256 root generated.\n");
+        uart_com2_write_exact(com2_ioport_path.capPtr, (const uint8_t *)audit_frame->computed_root_hash, 32);
         printf("rootserver: [COM2 ACK] Sent 32-byte SHA-256 digest back over serial.\n");
     } else {
         printf("rootserver: [COM2 ERROR] Corrupt magic 0x%08x received!\n", (unsigned int)audit_frame->magic);
@@ -217,6 +217,7 @@ int main(void) {
                 seL4_SetMR(0, 0xE002);
                 reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
             } else {
+                evaluate_and_hash_frame(audit_frame);
                 seL4_SetMR(0, 0);
                 reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
             }
