@@ -1,0 +1,34 @@
+name: Formal Verification & Invariant Regression
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify:
+    name: CBMC & Sanitizer Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Verification Tools & Compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cbmc clang gcc
+
+      - name: Execute Formal Bounded Model Checking (CBMC)
+        run: |
+          chmod +x apps/rootserver/verify/run_cbmc.sh
+          ./apps/rootserver/verify/run_cbmc.sh
+
+      - name: Execute AddressSanitizer & UndefinedBehaviorSanitizer Regression
+        run: |
+          clang -Wall -Wextra -O2 -fsanitize=address,undefined \
+            apps/rootserver/verify/verify_harness.c \
+            -o /tmp/harness_asan
+          /tmp/harness_asan
+          rm -f /tmp/harness_asan
