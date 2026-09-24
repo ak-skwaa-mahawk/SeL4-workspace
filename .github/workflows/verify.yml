@@ -29,6 +29,6 @@ jobs:
         run: |
           clang -Wall -Wextra -O2 -fsanitize=address,undefined \
             apps/rootserver/verify/verify_harness.c \
-            -o /tmp/harness_asan
-          /tmp/harness_asan
-          rm -f /tmp/harness_asan
+            -o ./harness_asan
+          ./harness_asan
+          rm -f ./harness_asan

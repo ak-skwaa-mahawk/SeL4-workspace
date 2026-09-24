@@ -47,6 +47,7 @@ typedef struct {
     uint32_t magic;
     uint16_t version;
     uint16_t fiduciary_role;
+    uint64_t sequence_id;        /* Sequence 27 Monotonic Anti-Replay Counter */
     uint8_t  veteran_verified;
     uint8_t  node_count;
     uint8_t  reserved[6];
