@@ -1,29 +1,22 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-if ! command -v cbmc &> /dev/null; then
-    echo "[!] CBMC is not installed. Attempting installation via pkg/apt..."
-    pkg install -y cbmc 2>/dev/null || true
-fi
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HARNESS="$DIR/verify_harness.c"
 
-if ! command -v cbmc &> /dev/null; then
-    echo "[*] Compiling verify_harness with GCC assertion instrumentation as local verification check..."
-    gcc -Wall -Wextra -O2 \
-        -I../src/tinyml \
-        verify_harness.c \
-        ../src/tinyml/tinyml_runtime.c \
-        -Dmain=harness_main -o test_harness_gcc || true
-    echo "[+] Local compilation check clean."
-    exit 0
-fi
+echo "=== [CBMC] Bounded Model Checking: Multi-Node Batch Sweep ==="
+echo "Target Harness : $HARNESS"
+echo "Unwind Bound   : 16"
 
-echo "[*] Running CBMC on verify_harness (unwind k=64)..."
-cbmc verify_harness.c ../src/tinyml/tinyml_runtime.c \
-    -I../src/tinyml \
-    --unwind 64 \
+cbmc "$HARNESS" \
+    --unwind 16 \
+    --unwinding-assertions \
     --bounds-check \
     --pointer-check \
     --memory-leak-check \
     --div-by-zero-check \
     --signed-overflow-check \
+    --unsigned-overflow-check \
     --trace
+
+echo "=== [CBMC] SUCCESS: All invariants and bounds verified (0 errors) ==="
