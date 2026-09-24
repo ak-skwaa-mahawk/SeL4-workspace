@@ -1,0 +1,71 @@
+/*
+ * SovereignAppliance.camkes
+ * Declarative capability topology isolating hardware I/O from untrusted inference.
+ */
+
+import <std_connector.camkes>;
+
+/* Component Interfaces */
+procedure SovereignEvaluation {
+    int evaluate(in uint32_t magic, in uint32_t node_count, in uint8_t raw_nodes[512], out uint16_t status, out uint16_t flags, out uint8_t root_hash[32]);
+};
+
+procedure ModelInference {
+    int run_inference(in uint8_t input_features[128], out int32_t classification, out uint32_t confidence_q16);
+};
+
+/* Hardware Ingestion Driver (Bound to COM2 IRQ 3) */
+component UartIngestionDriver {
+    hardware;
+    provides SovereignEvaluation eval_client;
+    consumes IrqSignal com2_irq;
+    emits FrameReady notification_out;
+}
+
+/* Sandboxed TinyML Inference Runtime (ZERO I/O CAPABILITIES) */
+component SandboxedTinyMLRuntime {
+    provides ModelInference infer;
+    // Strictly no hardware capabilities, no network, no direct memory mappings
+}
+
+/* Formal Attestation & Evaluation Rootserver Monitor */
+component SovereignAuditMonitor {
+    provides SovereignEvaluation eval_service;
+    uses ModelInference model;
+    consumes FrameReady frame_notify;
+    has mutex state_lock;
+}
+
+/* System Composition */
+configuration {
+    /* Explicit VSpace and Untyped Memory Pool Allocations */
+    UartIngestionDriver.com2_irq_attributes = 3;
+    
+    /* Memory Isolation: Restrict SandboxedTinyMLRuntime heap/stack to private untyped frames */
+    SandboxedTinyMLRuntime.environment = "freestanding";
+    SandboxedTinyMLRuntime.heap_size = 0x10000;  // 64 KiB static scratchpad
+    SandboxedTinyMLRuntime.stack_size = 0x4000;  // 16 KiB bounded stack
+
+    /* Audit Monitor: Memory-mapped journal scratchpad */
+    SovereignAuditMonitor.heap_size = 0x20000;
+}
+
+assembly {
+    composition {
+        component UartIngestionDriver uart_drv;
+        component SandboxedTinyMLRuntime tiny_ml;
+        component SovereignAuditMonitor monitor;
+
+        /* Capability Gate 1: Hardware Interrupt binding */
+        connection seL4HardwareInterrupt irq_conn(from uart_drv.com2_irq, to uart_drv.com2_irq);
+
+        /* Capability Gate 2: IPC notification from Driver to Monitor */
+        connection seL4Notification notify_conn(from uart_drv.notification_out, to monitor.frame_notify);
+
+        /* Capability Gate 3: Restricted Sync RPC from Driver to Monitor */
+        connection seL4RPCCall eval_rpc(from uart_drv.eval_client, to monitor.eval_service);
+
+        /* Capability Gate 4: Sandboxed model invocation (Monitor -> TinyML) */
+        connection seL4RPCCall infer_rpc(from monitor.model, to tiny_ml.infer);
+    }
+}
