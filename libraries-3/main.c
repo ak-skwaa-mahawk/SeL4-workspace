@@ -220,13 +220,17 @@ int main(void) {
                         memcpy((void *)audit_frame, rx_buffer, sizeof(sovereign_audit_frame_t));
                         evaluate_and_hash_frame(audit_frame);
 
-                    /* Isolated TinyML fixed-point inference pass */
-                    int32_t ml_cls = 0;
-                    uint32_t ml_conf = 0;
-                    tinyml_infer((const uint8_t *)audit_frame->nodes, &ml_cls, &ml_conf);
-                    if (ml_cls != 0) {
-                        /* Invariant flag: record anomaly signal */
-                        resp.flags |= 0x0002;
+                    /* Bounded multi-node TinyML fixed-point inference sweep */
+                    for (uint32_t n = 0; n < audit_frame->node_count && n < MAX_NODES; n++) {
+                        int32_t ml_cls = 0;
+                        uint32_t ml_conf = 0;
+                        /* Evaluate node payload (64 bytes feature vector zero-padded to 128) */
+                        uint8_t feature_buf[128] = {0};
+                        memcpy(feature_buf, (const uint8_t *)&audit_frame->nodes[n], sizeof(feature_buf) < sizeof(audit_frame->nodes[n]) ? sizeof(feature_buf) : sizeof(audit_frame->nodes[n]));
+                        tinyml_infer(feature_buf, &ml_cls, &ml_conf);
+                        if (ml_cls != 0) {
+                            resp.flags |= SOVR_FLAG_ANOMALY_DETECTED; /* Invariant flag: anomalous pattern detected */
+                        }
                     }
 
                         resp.status_code = SOVR_STATUS_SUCCESS;

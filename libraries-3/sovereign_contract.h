@@ -31,6 +31,7 @@
 #define SOVR_FLAG_STATUTORY_DUTY         (1 << 0)
 #define SOVR_FLAG_CORP_DEFENSE_VALID     (1 << 1)
 #define SOVR_FLAG_CAN_BE_ADMINISTERED    (1 << 2)
+#define SOVR_FLAG_ANOMALY_DETECTED       (1 << 3)
 
 #pragma pack(push, 1)
 
