@@ -95,7 +95,7 @@ int main(void) {
     assert(virtual_reservation.res);
     bootstrap_configure_virtual_pool(allocman, vaddr, ALLOCATOR_VIRTUAL_POOL_SIZE, seL4_CapInitThreadVSpace);
 
-    /* 1. Allocate communication endpoint */
+    /* 1. Endpoint allocation */
     vka_object_t ep_object = {0};
     error = vka_alloc_endpoint(&vka, &ep_object);
     ZF_LOGF_IFERR(error, "Failed to allocate endpoint");
@@ -103,7 +103,7 @@ int main(void) {
     cspacepath_t ep_path;
     vka_cspace_make_path(&vka, ep_object.cptr, &ep_path);
 
-    /* 2. Allocate 4KB physical frame */
+    /* 2. Shared physical page allocation */
     vka_object_t shared_frame_obj = {0};
     error = vka_alloc_frame(&vka, seL4_PageBits, &shared_frame_obj);
     ZF_LOGF_IFERR(error, "Failed to allocate shared frame object");
@@ -120,14 +120,13 @@ int main(void) {
                             seL4_AllRights);
     ZF_LOGF_IFERR(error, "Failed to copy frame capability");
 
-    /* Map shared frame into root task */
     vka_object_t root_pt_objects[NUM_PAGE_LEVELS];
     int root_num_pt_objects = 0;
     error = sel4utils_map_page(&vka, seL4_CapInitThreadVSpace, frame_path_root.capPtr, SHARED_BUF_VADDR,
                                seL4_AllRights, 1, root_pt_objects, &root_num_pt_objects);
     ZF_LOGF_IFERR(error, "Failed to map shared page into root task");
 
-    /* 3. Setup COM2 Hardware I/O Port Capability */
+    /* 3. COM2 Port I/O Capability */
     cspacepath_t com2_ioport_path;
     error = vka_cspace_alloc_path(&vka, &com2_ioport_path);
     ZF_LOGF_IFERR(error, "Failed to allocate cspace slot for COM2 IOPort");
@@ -137,10 +136,10 @@ int main(void) {
     ZF_LOGF_IFERR(error, "Failed to obtain COM2 IOPort capability");
 
     uart_com2_init(com2_ioport_path.capPtr);
-    printf("rootserver: [COM2] Continuous Hardware UART listener active at 0x%x-0x%x (115200 8N1)\n",
+    printf("rootserver: [COM2] Continuous Structured UART listener active at 0x%x-0x%x\n",
            COM2_PORT_BASE, COM2_PORT_TOP);
 
-    /* 4. Configure and Spawn Client Process ("app") */
+    /* 4. Client Process Configuration */
     sel4utils_process_t client_proc;
     sel4utils_process_config_t client_conf = process_config_default_simple(&simple, CLIENT_IMAGE_NAME, 200);
     error = sel4utils_configure_process_custom(&client_proc, &vka, &vspace, client_conf);
@@ -169,14 +168,13 @@ int main(void) {
     volatile sovereign_audit_frame_t *audit_frame = (volatile sovereign_audit_frame_t *)SHARED_BUF_VADDR;
     volatile int *shared_buf = (volatile int *)SHARED_BUF_VADDR;
 
-    /* Continuous COM2 Stream Accumulator */
     uint8_t rx_buffer[sizeof(sovereign_audit_frame_t)];
     size_t rx_index = 0;
 
     while (1) {
         bool had_work = false;
 
-        /* --- 1. Service COM2 Ingestion --- */
+        /* --- 1. COM2 Serial Ingestion --- */
         while (uart_com2_has_data(com2_ioport_path.capPtr)) {
             had_work = true;
             uint8_t byte = uart_com2_read_byte(com2_ioport_path.capPtr);
@@ -185,23 +183,33 @@ int main(void) {
             if (rx_index == sizeof(sovereign_audit_frame_t)) {
                 rx_index = 0;
                 sovereign_audit_frame_t *incoming = (sovereign_audit_frame_t *)rx_buffer;
-                printf("rootserver: [COM2] Frame received (808 bytes). Magic: 0x%08x\n", (unsigned int)incoming->magic);
+                sovereign_response_frame_t resp = {0};
+                resp.magic = SOVA_MAGIC;
 
-                if (incoming->magic == SOVR_MAGIC) {
+                if (incoming->magic != SOVR_MAGIC) {
+                    printf("rootserver: [COM2 REJECT] Invalid magic 0x%08x\n", (unsigned int)incoming->magic);
+                    resp.status_code = SOVR_STATUS_ERR_MAGIC;
+                } else if (incoming->node_count > MAX_NODES) {
+                    printf("rootserver: [COM2 REJECT] Node count out of bounds (%u > %u)\n", incoming->node_count, MAX_NODES);
+                    resp.status_code = SOVR_STATUS_ERR_BOUNDS;
+                } else {
                     memcpy((void *)audit_frame, rx_buffer, sizeof(sovereign_audit_frame_t));
                     evaluate_and_hash_frame(audit_frame);
-                    printf("rootserver: [COM2 EVAL] Standing verified. SHA-256 generated.\n");
-                    uart_com2_write_exact(com2_ioport_path.capPtr, (const uint8_t *)audit_frame->computed_root_hash, 32);
-                    printf("rootserver: [COM2 ACK] Sent 32-byte digest acknowledgment.\n");
-                } else {
-                    printf("rootserver: [COM2 ERROR] Invalid magic 0x%08x rejected!\n", (unsigned int)incoming->magic);
-                    uint8_t err_resp[32] = {0};
-                    uart_com2_write_exact(com2_ioport_path.capPtr, err_resp, 32);
+
+                    resp.status_code = SOVR_STATUS_SUCCESS;
+                    if (audit_frame->statutory_duty)           resp.flags |= SOVR_FLAG_STATUTORY_DUTY;
+                    if (audit_frame->corporate_defense_valid)  resp.flags |= SOVR_FLAG_CORP_DEFENSE_VALID;
+                    if (audit_frame->can_be_administered_away) resp.flags |= SOVR_FLAG_CAN_BE_ADMINISTERED;
+                    memcpy(resp.root_hash, (const void *)audit_frame->computed_root_hash, 32);
+
+                    printf("rootserver: [COM2 ACK] Certified frame. Status: 0x%04x, Flags: 0x%04x\n", resp.status_code, resp.flags);
                 }
+
+                uart_com2_write_exact(com2_ioport_path.capPtr, (const uint8_t *)&resp, sizeof(resp));
             }
         }
 
-        /* --- 2. Service Non-Blocking IPC --- */
+        /* --- 2. Non-Blocking IPC Servicing --- */
         seL4_Word sender_badge = 0;
         seL4_MessageInfo_t msg_info = seL4_NBRecv(ep_object.cptr, &sender_badge);
 
@@ -230,25 +238,23 @@ int main(void) {
                 reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
             } else if (op == OP_SOVR_EVALUATE) {
                 if (sender_badge != ROLE_FIDUCIARY_PR) {
-                    seL4_SetMR(0, 0xE001);
+                    seL4_SetMR(0, SOVR_STATUS_ERR_UNAUTH);
                     reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
                 } else if (audit_frame->magic != SOVR_MAGIC) {
-                    seL4_SetMR(0, 0xE002);
+                    seL4_SetMR(0, SOVR_STATUS_ERR_MAGIC);
                     reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
                 } else {
                     evaluate_and_hash_frame(audit_frame);
-                    seL4_SetMR(0, 0);
+                    seL4_SetMR(0, SOVR_STATUS_SUCCESS);
                     reply_tag = seL4_MessageInfo_new(0, 0, 0, 1);
                 }
             } else {
                 reply_tag = seL4_MessageInfo_new(0, 0, 0, 0);
             }
 
-            /* Reply directly to the unblocked caller */
             seL4_Reply(reply_tag);
         }
 
-        /* --- 3. Yield CPU if Idle --- */
         if (!had_work) {
             seL4_Yield();
         }

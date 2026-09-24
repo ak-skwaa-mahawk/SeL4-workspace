@@ -4,6 +4,7 @@
 #include <sel4/sel4.h>
 
 #define SOVR_MAGIC              0x534F5652  /* "SOVR" */
+#define SOVA_MAGIC              0x534F5641  /* "SOVA" - Structured Ack */
 #define SOVR_VERSION            1
 #define SHA256_DIGEST_LENGTH    32
 #define MAX_DOCKET_STR_LEN      48
@@ -19,6 +20,17 @@
 
 #define ROLE_FIDUCIARY_PR          0xC001  /* Matches verified capability badge */
 #define ROLE_PASSIVE_SHAREHOLDER   0x0000
+
+/* Status / Error Codes */
+#define SOVR_STATUS_SUCCESS         0x0000
+#define SOVR_STATUS_ERR_UNAUTH      0xE001
+#define SOVR_STATUS_ERR_MAGIC       0xE002
+#define SOVR_STATUS_ERR_BOUNDS      0xE003
+
+/* Flags Bitmask */
+#define SOVR_FLAG_STATUTORY_DUTY         (1 << 0)
+#define SOVR_FLAG_CORP_DEFENSE_VALID     (1 << 1)
+#define SOVR_FLAG_CAN_BE_ADMINISTERED    (1 << 2)
 
 #pragma pack(push, 1)
 
@@ -53,6 +65,15 @@ typedef struct {
     uint8_t  status_padding[2];
 } sovereign_audit_frame_t;
 
+/* 40-byte Structured Response Frame */
+typedef struct {
+    uint32_t magic;                      /* 0x534F5641 ("SOVA") */
+    uint16_t status_code;                /* SOVR_STATUS_* */
+    uint16_t flags;                      /* Evaluation bitmask */
+    uint8_t  root_hash[32];              /* SHA-256 Digest */
+} sovereign_response_frame_t;
+
 #pragma pack(pop)
 
 _Static_assert(sizeof(sovereign_audit_frame_t) == 808, "sovereign_audit_frame_t size must exactly match 808 bytes");
+_Static_assert(sizeof(sovereign_response_frame_t) == 40, "sovereign_response_frame_t size must exactly match 40 bytes");
