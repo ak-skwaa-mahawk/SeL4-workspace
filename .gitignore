@@ -1,0 +1,17 @@
+*_build/
+*.o
+*.elf
+*.bin
+*.cpio
+images/
+.ninja_*
+.tutegen/
+*.pyc
+__pycache__/
+.repo/
+kernel/
+tools/
+toolchain-bin/
+projects/
+threads/
+hello-camkes-*/

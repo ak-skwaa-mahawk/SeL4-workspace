@@ -1,0 +1,15 @@
+#!/bin/sh
+ARGS=""
+for arg in "$@"; do
+    case "$arg" in
+        -Wa,--64|-Wa,--32)
+            ;;
+        --target=)
+            ;;
+        *)
+            ARGS="$ARGS \"$arg\""
+            ;;
+    esac
+done
+
+eval exec clang -target x86_64-unknown-linux-gnu -L/data/data/com.termux/files/home/seL4-workspace/toolchain-wrappers/lib $ARGS
