@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "sovereign_identities.h"
 
 #define SOVR_MAGIC                  0x534F5652  /* 'SOVR' */
 #define SOVA_MAGIC                  0x534F5641  /* 'SOVA' */
