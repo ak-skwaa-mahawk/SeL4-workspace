@@ -75,6 +75,17 @@ static void evaluate_and_hash_frame(volatile sovereign_audit_frame_t *audit_fram
 
 static uint64_t g_last_sequence_id = 0;
 
+static int verify_quorum_committee(const sovereign_audit_frame_t *frame) {
+    if (frame->quorum_count < QUORUM_THRESHOLD || frame->quorum_count > MAX_QUORUM_SIGNERS) {
+        return -1;
+    }
+    uint32_t valid_signers = __builtin_popcount((unsigned int)frame->signer_bitmap);
+    if (valid_signers < QUORUM_THRESHOLD) {
+        return -1;
+    }
+    return 0;
+}
+
 int main(void) {
     int error;
     seL4_BootInfo *bootinfo = platsupport_get_bootinfo();
@@ -224,6 +235,12 @@ int main(void) {
                     } else if (incoming->node_count > MAX_NODES) {
                         printf("rootserver: [COM2 REJECT] Node count out of bounds (%u > %u)\n", incoming->node_count, MAX_NODES);
                         resp.status_code = SOVR_STATUS_ERR_BOUNDS;
+                    } else if (verify_quorum_committee(incoming) != 0) {
+                        printf("rootserver: [COM2 REJECT] Insufficient quorum committee (count=%u, mask=0x%02x)\n",
+                               incoming->quorum_count, incoming->signer_bitmap);
+                        resp.status_code = SOVR_STATUS_ERR_QUORUM;
+                        resp.flags = 0x0000;
+                        memset(resp.root_hash, 0, 32);
                     } else {
                         memcpy((void *)audit_frame, rx_buffer, sizeof(sovereign_audit_frame_t));
                         g_last_sequence_id = incoming->sequence_id;
@@ -246,6 +263,7 @@ int main(void) {
                         if (audit_frame->statutory_duty)           resp.flags |= SOVR_FLAG_STATUTORY_DUTY;
                         if (audit_frame->corporate_defense_valid)  resp.flags |= SOVR_FLAG_CORP_DEFENSE_VALID;
                         if (audit_frame->can_be_administered_away) resp.flags |= SOVR_FLAG_CAN_BE_ADMINISTERED;
+                        resp.flags |= SOVR_FLAG_QUORUM_VERIFIED;
                         memcpy(resp.root_hash, (const void *)audit_frame->computed_root_hash, 32);
 
                         printf("rootserver: [COM2 ACK] Certified frame. Status: 0x%04x, Flags: 0x%04x\n", resp.status_code, resp.flags);
