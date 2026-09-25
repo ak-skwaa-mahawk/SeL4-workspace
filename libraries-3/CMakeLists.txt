@@ -20,7 +20,8 @@ target_link_libraries(app sel4runtime sel4 muslc utils sel4tutorials
 include(cpio)
 MakeCPIO(archive.o "$<TARGET_FILE:app>")
 
-add_executable(libraries-3 archive.o main.c)
+add_executable(libraries-3 archive.o main.c
+    sovereign_crypto.c)
 
 target_link_libraries(libraries-3
     sel4
