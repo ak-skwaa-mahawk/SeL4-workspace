@@ -279,8 +279,16 @@ static void pow2523(gf o, const gf i) {
     gf_set(o, c);
 }
 
+static int gf_isnonzero(const gf a) {
+    uint8_t b[32];
+    gf_pack(b, a);
+    uint8_t diff = 0;
+    for (int i = 0; i < 32; i++) diff |= b[i];
+    return diff != 0;
+}
+
 static int unpackneg(gf rx, gf ry, const uint8_t *p) {
-    gf one = {1}, num, den, den2, den4, den6, t, chk;
+    gf one = {1}, num, den, den2, den4, den6, t, chk, diff;
     gf_unpack(ry, p);
     gf_sq(num, ry);
     gf_mul(den, num, D);
@@ -302,18 +310,13 @@ static int unpackneg(gf rx, gf ry, const uint8_t *p) {
     gf_sq(chk, rx);
     gf_mul(chk, chk, den);
 
-    uint8_t chk_b[32], num_b[32];
-    gf_pack(chk_b, chk);
-    gf_pack(num_b, num);
-
-    if (sovereign_crypto_verify_32(chk_b, num_b) != 0) {
-        gf_mul(rx, rx, I);
-        gf_sq(chk, rx);
-        gf_mul(chk, chk, den);
-        gf_pack(chk_b, chk);
-        if (sovereign_crypto_verify_32(chk_b, num_b) != 0) {
+    gf_sub(diff, chk, num);
+    if (gf_isnonzero(diff)) {
+        gf_add(diff, chk, num);
+        if (gf_isnonzero(diff)) {
             return -1;
         }
+        gf_mul(rx, rx, I);
     }
 
     uint8_t rx_b[32];
@@ -321,8 +324,6 @@ static int unpackneg(gf rx, gf ry, const uint8_t *p) {
     if ((rx_b[0] & 1) != (p[31] >> 7)) {
         gf zero = {0};
         gf_sub(rx, zero, rx);
-        car25519(rx);
-        car25519(rx);
     }
     return 0;
 }
