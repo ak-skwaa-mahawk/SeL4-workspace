@@ -89,20 +89,23 @@ static int verify_quorum_committee(const sovereign_audit_frame_t *frame) {
         return -1;
     }
 
-    /* Compute canonical 64-byte SHA-512 digest over Header (32B) + Metadata (32B) + Nodes (256B) = 320B */
-    uint8_t frame_digest[64];
-    sovereign_sha512((const uint8_t *)frame, 320, frame_digest);
-
     uint32_t witness_idx = 0;
     for (uint32_t bit = 0; bit < MAX_QUORUM_SIGNERS; bit++) {
         if (frame->signer_bitmap & (1 << bit)) {
             if (witness_idx >= frame->quorum_count) {
                 return -1;
             }
-            /* Constant-time 32-byte public key comparison */
+
+            /* Invariant 1: Public key matches authorized committee root key */
             if (sovereign_crypto_verify_32(frame->witnesses[witness_idx].signer_pubkey, SOVR_ROOT_PUBKEYS[bit]) != 0) {
                 return -2;
             }
+
+            /* Invariant 2: Cryptographic Ed25519 detached signature verification over bytes 0..319 */
+            if (sovereign_ed25519_verify(frame->witnesses[witness_idx].signature, (const uint8_t *)frame, 320, frame->witnesses[witness_idx].signer_pubkey) != 0) {
+                return -3;
+            }
+
             witness_idx++;
         }
     }
