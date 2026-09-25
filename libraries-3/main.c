@@ -22,6 +22,7 @@
 #include <sel4platsupport/bootinfo.h>
 
 #include "sovereign_contract.h"
+#include "sovereign_identities.h"
 #include "sha256.h"
 #include "uart_com2.h"
 
@@ -75,13 +76,28 @@ static void evaluate_and_hash_frame(volatile sovereign_audit_frame_t *audit_fram
 
 static uint64_t g_last_sequence_id = 0;
 
+#include "sovereign_identities.h"
 static int verify_quorum_committee(const sovereign_audit_frame_t *frame) {
+    if (!frame) return -1;
     if (frame->quorum_count < QUORUM_THRESHOLD || frame->quorum_count > MAX_QUORUM_SIGNERS) {
         return -1;
     }
     uint32_t valid_signers = __builtin_popcount((unsigned int)frame->signer_bitmap);
-    if (valid_signers < QUORUM_THRESHOLD) {
+    if (valid_signers < QUORUM_THRESHOLD || valid_signers != frame->quorum_count) {
         return -1;
+    }
+
+    uint32_t witness_idx = 0;
+    for (uint32_t bit = 0; bit < MAX_QUORUM_SIGNERS; bit++) {
+        if (frame->signer_bitmap & (1 << bit)) {
+            if (witness_idx >= frame->quorum_count) {
+                return -1;
+            }
+            if (memcmp(frame->witnesses[witness_idx].signer_pubkey, SOVR_ROOT_PUBKEYS[bit], 32) != 0) {
+                return -2;
+            }
+            witness_idx++;
+        }
     }
     return 0;
 }
